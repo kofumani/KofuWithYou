@@ -13,6 +13,7 @@
     { type: 'image', src: 'assets/kofu-midnight-radio.webp', label: '深夜のゲームラジオ' },
     { type: 'image', src: 'assets/kofu-rain-room.webp', label: '雨のゲーム部屋' },
     { type: 'image', src: 'assets/kofu-vineyard-morning.webp', label: 'ぶどう畑の朝' },
+    { type: 'image', src: 'assets/gallery/kofu-overlay.webp', label: 'ギャラリー用こふねゐ' },
     { type: 'audio', elementId: 'lofiAudio', label: 'Lo-Fi BGM' },
     { type: 'audio', elementId: 'midAudio', label: 'こふねゐボイス' }
   ];
@@ -23,6 +24,14 @@
     rain: { name: '雨のゲーム部屋', src: 'assets/kofu-rain-room.webp' },
     morning: { name: 'ぶどう畑の朝', src: 'assets/kofu-vineyard-morning.webp' }
   };
+
+  const galleryItems = (window.KOFUNEI_GALLERY_ITEMS || []).map(item => ({
+    ...item,
+    placement: { ...item.placement }
+  }));
+  const GALLERY_EDITS_KEY = 'kofunei-gallery-edits-v1';
+  const KOFU_OVERLAY_SRC = 'assets/gallery/kofu-overlay.webp';
+  const KOFU_OVERLAY_ASPECT = 1682 / 1004;
 
   const levelThresholds = [0, 10, 30, 60, 120, 240, 420, 660, 960, 1440].map(minutes => minutes * 60);
   const levelTitles = [
@@ -87,6 +96,13 @@
   let ambienceStarted = false;
   let appInitialized = false;
   let perippaFlightTimer = null;
+  let activeGalleryIndex = 0;
+  let galleryEdits = loadGalleryEdits();
+  let editorPlacement = null;
+  let editorBaseImage = null;
+  let editorOverlayImage = null;
+  let editorDrag = null;
+  let editorLoadToken = 0;
 
   const el = {
     body: document.body,
@@ -105,7 +121,11 @@
     app: $('#app'), loadingScreen: $('#loadingScreen'), loadingProgress: $('#loadingProgress'),
     loadingKicker: $('#loadingKicker'), loadingAssetName: $('#loadingAssetName'), loadingPercent: $('#loadingPercent'),
     loadingProgressBar: $('#loadingProgressBar'), loadingAssetCount: $('#loadingAssetCount'),
-    loadingStart: $('#loadingStart'), loadingRetry: $('#loadingRetry')
+    loadingStart: $('#loadingStart'), loadingRetry: $('#loadingRetry'),
+    gallery: $('#gallery'), galleryButton: $('#galleryButton'), galleryClose: $('#galleryClose'),
+    galleryGrid: $('#galleryGrid'), galleryLightbox: $('#galleryLightbox'),
+    editorCanvas: $('#editorCanvas'), editorLoading: $('#editorLoading'), editorHint: $('#editorHint'),
+    lightboxMeta: $('#lightboxMeta'), lightboxTitle: $('#lightboxTitle'), lightboxDownload: $('#lightboxDownload')
   };
 
   startBootSequence();
@@ -210,6 +230,7 @@
     setBackground(state.background, true);
     buildAtmosphere();
     schedulePerippaFlight(true);
+    buildGallery();
     bindEvents();
     applySoundSettings();
     if (state.active) accountTime();
@@ -251,6 +272,22 @@
     el.characterButton.addEventListener('click', handleCharacterClick);
     $('#backgroundButton').addEventListener('click', () => toggleDrawer(el.backgroundDrawer));
     $('#soundButton').addEventListener('click', () => { ensureAudio(); toggleDrawer(el.soundDrawer); });
+    el.galleryButton.addEventListener('click', openGallery);
+    el.galleryClose.addEventListener('click', closeGallery);
+    $$('.gallery-preview').forEach(button => button.addEventListener('click', () => openLightbox(Number(button.dataset.galleryIndex))));
+    $$('.gallery-edit-button').forEach(button => button.addEventListener('click', () => openLightbox(Number(button.dataset.galleryIndex))));
+    $('#lightboxClose').addEventListener('click', closeLightbox);
+    $('#lightboxPrev').addEventListener('click', () => stepLightbox(-1));
+    $('#lightboxNext').addEventListener('click', () => stepLightbox(1));
+    el.lightboxDownload.addEventListener('click', downloadEditedThumbnail);
+    $('#overlayFlip').addEventListener('click', flipEditorOverlay);
+    el.editorCanvas.addEventListener('pointerdown', startEditorDrag);
+    el.editorCanvas.addEventListener('pointermove', moveEditorDrag);
+    el.editorCanvas.addEventListener('pointerup', stopEditorDrag);
+    el.editorCanvas.addEventListener('pointercancel', stopEditorDrag);
+    el.galleryLightbox.addEventListener('click', event => {
+      if (event.target === el.galleryLightbox) closeLightbox();
+    });
     $('#fullscreenButton').addEventListener('click', toggleFullscreen);
     el.drawerScrim.addEventListener('click', closeDrawers);
     $$('[data-close-drawer]').forEach(button => button.addEventListener('click', closeDrawers));
@@ -546,6 +583,372 @@
     $('#soundButton').classList.remove('active');
   }
 
+  function loadGalleryEdits() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(GALLERY_EDITS_KEY));
+      return saved && typeof saved === 'object' ? saved : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function buildGallery() {
+    el.galleryGrid.replaceChildren();
+    const count = galleryItems.length;
+    $('#galleryArchiveCount').textContent = `THUMBNAIL ARCHIVE · ${String(count).padStart(3, '0')}`;
+    $('#galleryReadyCount').textContent = `${count} THUMBNAILS READY TO EDIT`;
+
+    galleryItems.forEach((item, index) => {
+      const article = document.createElement('article');
+      article.className = 'gallery-card';
+
+      const preview = document.createElement('button');
+      preview.className = 'gallery-preview';
+      preview.dataset.galleryIndex = index;
+      preview.setAttribute('aria-label', `${item.title}を編集`);
+
+      const composite = document.createElement('span');
+      composite.className = 'gallery-composite';
+      composite.style.aspectRatio = `${item.width} / ${item.height}`;
+
+      const base = document.createElement('img');
+      base.className = 'gallery-base';
+      base.src = item.preview || item.src;
+      base.alt = item.title;
+      base.loading = 'lazy';
+      base.decoding = 'async';
+
+      const overlay = document.createElement('img');
+      overlay.className = 'gallery-overlay';
+      overlay.src = KOFU_OVERLAY_SRC;
+      overlay.alt = '';
+      overlay.dataset.galleryIndex = index;
+      overlay.loading = 'lazy';
+
+      const number = document.createElement('span');
+      number.className = 'gallery-number';
+      number.textContent = String(index + 1).padStart(2, '0');
+
+      const view = document.createElement('span');
+      view.className = 'gallery-view';
+      view.innerHTML = 'EDIT <svg><use href="#i-expand"></use></svg>';
+
+      composite.append(base, overlay);
+      preview.append(composite, number, view);
+
+      const copy = document.createElement('div');
+      copy.className = 'gallery-card-copy';
+      const text = document.createElement('div');
+      const meta = document.createElement('small');
+      meta.textContent = `THUMBNAIL · ${String(index + 1).padStart(2, '0')}`;
+      const title = document.createElement('h3');
+      title.textContent = item.title;
+      text.append(meta, title);
+
+      const edit = document.createElement('button');
+      edit.className = 'gallery-edit-button';
+      edit.dataset.galleryIndex = index;
+      edit.setAttribute('aria-label', `${item.title}を編集してダウンロード`);
+      edit.innerHTML = '<svg><use href="#i-download"></use></svg>';
+      copy.append(text, edit);
+      article.append(preview, copy);
+      el.galleryGrid.append(article);
+      updatePreviewOverlay(index);
+    });
+  }
+
+  function getGalleryPlacement(index) {
+    const item = galleryItems[index];
+    const saved = galleryEdits[item.src];
+    return saved && Number.isFinite(saved.x) && Number.isFinite(saved.y) && Number.isFinite(saved.w)
+      ? { x: saved.x, y: saved.y, w: saved.w, flipped: Boolean(saved.flipped) }
+      : { ...item.placement, flipped: false };
+  }
+
+  function updatePreviewOverlay(index) {
+    const overlay = $(`.gallery-overlay[data-gallery-index="${index}"]`);
+    if (!overlay) return;
+    const placement = getGalleryPlacement(index);
+    overlay.style.left = `${placement.x * 100}%`;
+    overlay.style.top = `${placement.y * 100}%`;
+    overlay.style.width = `${placement.w * 100}%`;
+    overlay.style.transform = placement.flipped ? 'scaleX(-1)' : 'none';
+  }
+
+  function openGallery() {
+    closeDrawers();
+    el.gallery.hidden = false;
+    el.galleryButton.classList.add('active');
+    el.body.classList.add('gallery-open');
+    requestAnimationFrame(() => el.galleryClose.focus({ preventScroll: true }));
+  }
+
+  function closeGallery() {
+    closeLightbox(false);
+    el.gallery.hidden = true;
+    el.galleryButton.classList.remove('active');
+    el.body.classList.remove('gallery-open');
+    el.galleryButton.focus({ preventScroll: true });
+  }
+
+  async function openLightbox(index) {
+    activeGalleryIndex = Math.max(0, Math.min(galleryItems.length - 1, index));
+    renderLightbox();
+    el.galleryLightbox.hidden = false;
+    await loadEditorItem();
+    requestAnimationFrame(() => $('#lightboxClose').focus({ preventScroll: true }));
+  }
+
+  function renderLightbox() {
+    const item = galleryItems[activeGalleryIndex];
+    el.lightboxMeta.textContent = `${String(activeGalleryIndex + 1).padStart(2, '0')} / ${String(galleryItems.length).padStart(2, '0')} · POSITION & SIZE EDITOR`;
+    el.lightboxTitle.textContent = item.title;
+  }
+
+  function closeLightbox(restoreFocus = true) {
+    if (el.galleryLightbox.hidden) return;
+    editorLoadToken += 1;
+    el.galleryLightbox.hidden = true;
+    if (restoreFocus) {
+      $(`.gallery-preview[data-gallery-index="${activeGalleryIndex}"]`)?.focus({ preventScroll: true });
+    }
+  }
+
+  async function stepLightbox(direction) {
+    activeGalleryIndex = (activeGalleryIndex + direction + galleryItems.length) % galleryItems.length;
+    renderLightbox();
+    await loadEditorItem();
+    el.editorCanvas.animate([{ opacity: .15, transform: `translateX(${direction * 12}px)` }, { opacity: 1, transform: 'none' }], { duration: 260, easing: 'ease-out' });
+  }
+
+  function loadImage(source) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = source;
+    });
+  }
+
+  async function loadEditorItem() {
+    const token = ++editorLoadToken;
+    const item = galleryItems[activeGalleryIndex];
+    editorBaseImage = null;
+    editorPlacement = getGalleryPlacement(activeGalleryIndex);
+    $('#overlayFlip').classList.toggle('active', editorPlacement.flipped);
+    $('#overlayFlip').setAttribute('aria-pressed', String(editorPlacement.flipped));
+    el.editorLoading.hidden = false;
+    el.editorHint.hidden = true;
+    el.editorCanvas.hidden = true;
+    try {
+      const [base, overlay] = await Promise.all([
+        loadImage(item.src),
+        editorOverlayImage ? Promise.resolve(editorOverlayImage) : loadImage(KOFU_OVERLAY_SRC)
+      ]);
+      if (token !== editorLoadToken) return;
+      editorBaseImage = base;
+      editorOverlayImage = overlay;
+      el.editorCanvas.width = base.naturalWidth;
+      el.editorCanvas.height = base.naturalHeight;
+      el.editorCanvas.style.aspectRatio = `${base.naturalWidth} / ${base.naturalHeight}`;
+      el.editorLoading.hidden = true;
+      el.editorHint.hidden = false;
+      el.editorCanvas.hidden = false;
+      drawEditor();
+    } catch {
+      if (token !== editorLoadToken) return;
+      el.editorLoading.textContent = '画像を読み込めませんでした';
+    }
+  }
+
+  function overlayHeightRatio(placement = editorPlacement) {
+    if (!editorBaseImage || !placement) return 0;
+    return placement.w * editorBaseImage.naturalWidth / KOFU_OVERLAY_ASPECT / editorBaseImage.naturalHeight;
+  }
+
+  function drawEditor(showGuides = true, targetCanvas = el.editorCanvas) {
+    if (!editorBaseImage || !editorOverlayImage || !editorPlacement) return;
+    const context = targetCanvas.getContext('2d');
+    const width = targetCanvas.width;
+    const height = targetCanvas.height;
+    const overlayWidth = editorPlacement.w * width;
+    const overlayHeight = overlayWidth / KOFU_OVERLAY_ASPECT;
+    const x = editorPlacement.x * width;
+    const y = editorPlacement.y * height;
+    context.clearRect(0, 0, width, height);
+    context.drawImage(editorBaseImage, 0, 0, width, height);
+    if (editorPlacement.flipped) {
+      context.save();
+      context.translate(x + overlayWidth, y);
+      context.scale(-1, 1);
+      context.drawImage(editorOverlayImage, 0, 0, overlayWidth, overlayHeight);
+      context.restore();
+    } else {
+      context.drawImage(editorOverlayImage, x, y, overlayWidth, overlayHeight);
+    }
+
+    if (!showGuides) return;
+    const line = Math.max(2, width / 500);
+    context.save();
+    context.strokeStyle = 'rgba(255, 199, 145, .95)';
+    context.lineWidth = line;
+    context.setLineDash([line * 4, line * 3]);
+    context.strokeRect(x, y, overlayWidth, overlayHeight);
+    context.setLineDash([]);
+    context.fillStyle = '#ffd0a5';
+    const handle = line * 3;
+    [[x, y], [x + overlayWidth, y], [x, y + overlayHeight], [x + overlayWidth, y + overlayHeight]].forEach(([handleX, handleY]) => {
+      context.beginPath();
+      context.arc(handleX, handleY, handle, 0, Math.PI * 2);
+      context.fill();
+    });
+    context.restore();
+  }
+
+  function editorPointerPosition(event) {
+    const rect = el.editorCanvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) / rect.width,
+      y: (event.clientY - rect.top) / rect.height,
+      rect
+    };
+  }
+
+  function editorHandleAt(point) {
+    if (!editorPlacement) return null;
+    const height = overlayHeightRatio();
+    const left = editorPlacement.x;
+    const top = editorPlacement.y;
+    const right = left + editorPlacement.w;
+    const bottom = top + height;
+    const handles = [
+      { name: 'nw', x: left, y: top, anchorX: right, anchorY: bottom, signX: -1, signY: -1 },
+      { name: 'ne', x: right, y: top, anchorX: left, anchorY: bottom, signX: 1, signY: -1 },
+      { name: 'sw', x: left, y: bottom, anchorX: right, anchorY: top, signX: -1, signY: 1 },
+      { name: 'se', x: right, y: bottom, anchorX: left, anchorY: top, signX: 1, signY: 1 }
+    ];
+    return handles.find(handle => {
+      const deltaX = (point.x - handle.x) * point.rect.width;
+      const deltaY = (point.y - handle.y) * point.rect.height;
+      return Math.hypot(deltaX, deltaY) <= 20;
+    }) || null;
+  }
+
+  function pointInsideOverlay(point) {
+    const height = overlayHeightRatio();
+    return point.x >= editorPlacement.x && point.x <= editorPlacement.x + editorPlacement.w
+      && point.y >= editorPlacement.y && point.y <= editorPlacement.y + height;
+  }
+
+  function startEditorDrag(event) {
+    if (!editorPlacement || !editorBaseImage) return;
+    const point = editorPointerPosition(event);
+    const handle = editorHandleAt(point);
+    if (handle) {
+      editorDrag = {
+        type: 'resize',
+        anchorX: handle.anchorX,
+        anchorY: handle.anchorY,
+        signX: handle.signX,
+        signY: handle.signY,
+        ratio: editorBaseImage.naturalWidth / KOFU_OVERLAY_ASPECT / editorBaseImage.naturalHeight
+      };
+    } else if (pointInsideOverlay(point)) {
+      editorDrag = {
+        type: 'move',
+        offsetX: point.x - editorPlacement.x,
+        offsetY: point.y - editorPlacement.y
+      };
+    } else {
+      return;
+    }
+    el.editorCanvas.setPointerCapture(event.pointerId);
+    el.editorCanvas.classList.add('dragging');
+    el.editorCanvas.style.cursor = 'grabbing';
+    event.preventDefault();
+  }
+
+  function moveEditorDrag(event) {
+    const point = editorPointerPosition(event);
+    if (!editorDrag || !editorPlacement) {
+      const handle = editorHandleAt(point);
+      if (handle) {
+        el.editorCanvas.style.cursor = handle.name === 'nw' || handle.name === 'se' ? 'nwse-resize' : 'nesw-resize';
+      } else {
+        el.editorCanvas.style.cursor = pointInsideOverlay(point) ? 'grab' : 'default';
+      }
+      return;
+    }
+
+    if (editorDrag.type === 'move') {
+      editorPlacement.x = point.x - editorDrag.offsetX;
+      editorPlacement.y = point.y - editorDrag.offsetY;
+    } else {
+      const deltaX = point.x - editorDrag.anchorX;
+      const deltaY = point.y - editorDrag.anchorY;
+      const ratio = editorDrag.ratio;
+      const projectedWidth = (
+        deltaX * editorDrag.signX
+        + deltaY * editorDrag.signY * ratio
+      ) / (1 + ratio * ratio);
+      const width = Math.min(1.25, Math.max(.03, projectedWidth));
+      const height = width * ratio;
+      editorPlacement.w = width;
+      editorPlacement.x = editorDrag.signX > 0 ? editorDrag.anchorX : editorDrag.anchorX - width;
+      editorPlacement.y = editorDrag.signY > 0 ? editorDrag.anchorY : editorDrag.anchorY - height;
+    }
+    drawEditor();
+    event.preventDefault();
+  }
+
+  function stopEditorDrag(event) {
+    if (!editorDrag) return;
+    editorDrag = null;
+    el.editorCanvas.classList.remove('dragging');
+    el.editorCanvas.style.cursor = 'grab';
+    if (el.editorCanvas.hasPointerCapture(event.pointerId)) el.editorCanvas.releasePointerCapture(event.pointerId);
+    saveEditorPlacement();
+  }
+
+  function saveEditorPlacement() {
+    if (!editorPlacement) return;
+    const item = galleryItems[activeGalleryIndex];
+    galleryEdits[item.src] = { ...editorPlacement };
+    try { localStorage.setItem(GALLERY_EDITS_KEY, JSON.stringify(galleryEdits)); } catch { /* storage is optional */ }
+    updatePreviewOverlay(activeGalleryIndex);
+  }
+
+  function flipEditorOverlay() {
+    if (!editorPlacement) return;
+    editorPlacement.flipped = !editorPlacement.flipped;
+    const button = $('#overlayFlip');
+    button.classList.toggle('active', editorPlacement.flipped);
+    button.setAttribute('aria-pressed', String(editorPlacement.flipped));
+    drawEditor();
+    saveEditorPlacement();
+  }
+
+  function downloadEditedThumbnail() {
+    if (!editorBaseImage || !editorOverlayImage || !editorPlacement) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = editorBaseImage.naturalWidth;
+    canvas.height = editorBaseImage.naturalHeight;
+    drawEditor(false, canvas);
+    canvas.toBlob(blob => {
+      if (!blob) {
+        showToast('PNGを作成できませんでした');
+        return;
+      }
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.href = url;
+      link.download = `kofunei-thumbnail-${String(activeGalleryIndex + 1).padStart(2, '0')}.png`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast('編集したPNGを保存しました');
+    }, 'image/png');
+  }
+
   async function toggleFullscreen() {
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
@@ -556,10 +959,17 @@
   }
 
   function handleKeyboard(event) {
-    if (event.target.matches('input,textarea,button')) return;
+    if (event.key === 'Escape') {
+      if (!el.galleryLightbox.hidden) closeLightbox();
+      else if (!el.gallery.hidden) closeGallery();
+      else closeDrawers();
+      return;
+    }
+    if (!el.galleryLightbox.hidden && event.key === 'ArrowLeft') { stepLightbox(-1); return; }
+    if (!el.galleryLightbox.hidden && event.key === 'ArrowRight') { stepLightbox(1); return; }
+    if (!el.gallery.hidden || event.target.matches('input,textarea,button')) return;
     if (event.code === 'Space') { event.preventDefault(); toggleWork(); }
     if (event.key.toLowerCase() === 'm') toggleMusic();
-    if (event.key === 'Escape') closeDrawers();
   }
 
   function handleVisibility() {
@@ -580,7 +990,10 @@
   }
 
   function paintRange(input) {
-    input.style.setProperty('--range', `${input.value}%`);
+    const minimum = Number(input.min || 0);
+    const maximum = Number(input.max || 100);
+    const percent = maximum > minimum ? (Number(input.value) - minimum) / (maximum - minimum) * 100 : 0;
+    input.style.setProperty('--range', `${Math.min(100, Math.max(0, percent))}%`);
   }
 
   function toggleMusic() {
