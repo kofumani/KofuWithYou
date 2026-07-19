@@ -14,6 +14,7 @@
     { type: 'image', src: 'assets/kofu-rain-room.webp', label: '雨のゲーム部屋' },
     { type: 'image', src: 'assets/kofu-vineyard-morning.webp', label: 'ぶどう畑の朝' },
     { type: 'image', src: 'assets/gallery/kofu-overlay.webp', label: 'ギャラリー用こふねゐ' },
+    { type: 'image', src: 'old.png', label: '旧こふねゐの黒塗りマスク' },
     { type: 'audio', elementId: 'lofiAudio', label: 'Lo-Fi BGM' },
     { type: 'audio', elementId: 'midAudio', label: 'こふねゐボイス' }
   ];
@@ -32,6 +33,9 @@
   const GALLERY_EDITS_KEY = 'kofunei-gallery-edits-v1';
   const KOFU_OVERLAY_SRC = 'assets/gallery/kofu-overlay.webp';
   const KOFU_OVERLAY_ASPECT = 1682 / 1004;
+  const OLD_REFERENCE_SRC = 'old.png';
+  const BLACKOUT_BLEED_PIXELS = 6;
+  const OLD_COMPLETE_MASK_HEIGHT = 480;
 
   const levelThresholds = [0, 10, 30, 60, 120, 240, 420, 660, 960, 1440].map(minutes => minutes * 60);
   const levelTitles = [
@@ -104,6 +108,7 @@
   let editorReferenceImage = null;
   let editorDrag = null;
   let editorLoadToken = 0;
+  let blackoutSilhouetteSourcePromise = null;
 
   const el = {
     body: document.body,
@@ -618,6 +623,23 @@
       base.alt = item.title;
       base.loading = 'lazy';
       base.decoding = 'async';
+      base.draggable = false;
+
+      const shouldBlackout = typeof item.confidence === 'number'
+        && item.confidence > 0
+        && item.silhouette;
+      const blackout = shouldBlackout ? document.createElement('img') : null;
+      if (blackout) {
+        blackout.className = 'gallery-blackout';
+        blackout.src = OLD_REFERENCE_SRC;
+        blackout.alt = '';
+        blackout.loading = 'lazy';
+        blackout.draggable = false;
+        blackout.style.left = `${item.silhouette.x * 100}%`;
+        blackout.style.top = `${item.silhouette.y * 100}%`;
+        blackout.style.width = `${item.silhouette.w * 100}%`;
+        blackout.style.height = `${item.silhouette.h * 100}%`;
+      }
 
       const overlay = document.createElement('img');
       overlay.className = 'gallery-overlay';
@@ -625,6 +647,7 @@
       overlay.alt = '';
       overlay.dataset.galleryIndex = index;
       overlay.loading = 'lazy';
+      overlay.draggable = false;
 
       const number = document.createElement('span');
       number.className = 'gallery-number';
@@ -634,7 +657,9 @@
       view.className = 'gallery-view';
       view.innerHTML = 'EDIT <svg><use href="#i-expand"></use></svg>';
 
-      composite.append(base, overlay);
+      composite.append(base);
+      if (blackout) composite.append(blackout);
+      composite.append(overlay);
       preview.append(composite, number, view);
 
       const copy = document.createElement('div');
@@ -656,6 +681,12 @@
       el.galleryGrid.append(article);
       updatePreviewOverlay(index);
     });
+
+    // Replace the CSS-blackened fallback with a binary, fully opaque mask.
+    // A small outward bleed hides antialiased source pixels at every scale.
+    getBlackoutSilhouetteSource()
+      .then(source => $$('.gallery-blackout').forEach(image => { image.src = source; }))
+      .catch(() => { /* old.png + CSS filter remains as a safe fallback */ });
   }
 
   function getGalleryPlacement(index) {
@@ -731,12 +762,76 @@
     });
   }
 
+  function getBlackoutSilhouetteSource() {
+    if (blackoutSilhouetteSourcePromise) return blackoutSilhouetteSourcePromise;
+    blackoutSilhouetteSourcePromise = loadImage(OLD_REFERENCE_SRC).then(referenceImage => {
+      const width = referenceImage.naturalWidth;
+      const height = OLD_COMPLETE_MASK_HEIGHT;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(referenceImage, 0, 0);
+
+      // old.png is cropped exactly at y=400, but the copies embedded in the
+      // thumbnails continue into these two feet. Reconstruct that missing
+      // lower silhouette before binarizing so no orange/white fragment remains.
+      context.fillStyle = '#000';
+      context.beginPath();
+      context.ellipse(205, 400, 115, 20, 0, 0, Math.PI * 2);
+      context.fill();
+
+      context.beginPath();
+      context.moveTo(98, 389);
+      context.bezierCurveTo(126, 385, 170, 388, 194, 404);
+      context.bezierCurveTo(213, 417, 223, 438, 216, 456);
+      context.bezierCurveTo(205, 461, 193, 459, 183, 453);
+      context.bezierCurveTo(177, 474, 157, 478, 145, 462);
+      context.bezierCurveTo(128, 476, 105, 469, 112, 450);
+      context.bezierCurveTo(91, 451, 94, 432, 111, 423);
+      context.bezierCurveTo(96, 414, 91, 400, 98, 389);
+      context.closePath();
+      context.fill();
+
+      context.beginPath();
+      context.moveTo(184, 386);
+      context.bezierCurveTo(211, 382, 248, 387, 267, 399);
+      context.bezierCurveTo(284, 409, 294, 424, 287, 439);
+      context.bezierCurveTo(278, 448, 265, 448, 253, 441);
+      context.bezierCurveTo(245, 456, 229, 454, 226, 438);
+      context.bezierCurveTo(211, 449, 196, 439, 202, 424);
+      context.bezierCurveTo(183, 417, 176, 398, 184, 386);
+      context.closePath();
+      context.fill();
+
+      const source = context.getImageData(0, 0, width, height).data;
+      const blackout = context.createImageData(width, height);
+      const radius = BLACKOUT_BLEED_PIXELS;
+
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          if (source[(y * width + x) * 4 + 3] === 0) continue;
+          const startY = Math.max(0, y - radius);
+          const endY = Math.min(height - 1, y + radius);
+          const startX = Math.max(0, x - radius);
+          const endX = Math.min(width - 1, x + radius);
+          for (let maskY = startY; maskY <= endY; maskY += 1) {
+            for (let maskX = startX; maskX <= endX; maskX += 1) {
+              blackout.data[(maskY * width + maskX) * 4 + 3] = 255;
+            }
+          }
+        }
+      }
+
+      context.clearRect(0, 0, width, height);
+      context.putImageData(blackout, 0, 0);
+      return canvas.toDataURL('image/png');
+    });
+    return blackoutSilhouetteSourcePromise;
+  }
+
   async function loadReferenceImage() {
-    try {
-      return await loadImage('old.webp');
-    } catch {
-      return loadImage('old.png');
-    }
+    return loadImage(await getBlackoutSilhouetteSource());
   }
 
   async function loadEditorItem() {
@@ -847,13 +942,14 @@
     if (shouldBlackoutOldImage && editorReferenceImage) {
       const silhouetteRect = getEditorSilhouetteRect(item);
       if (silhouetteRect) {
-        const referenceAspect = editorReferenceImage.naturalWidth / editorReferenceImage.naturalHeight;
-        const maxHeight = Math.max(8, silhouetteRect.h);
-        const silhouetteHeight = Math.max(8, Math.min(maxHeight, silhouetteRect.w / referenceAspect));
-        const silhouetteWidth = silhouetteHeight * referenceAspect;
-        const silhouetteX = silhouetteRect.x + (silhouetteRect.w - silhouetteWidth) / 2;
-        const silhouetteY = silhouetteRect.y + (silhouetteRect.h - silhouetteHeight) / 2;
-        drawReferenceSilhouetteMask(targetCanvas, editorReferenceImage, silhouetteX, silhouetteY, silhouetteWidth, silhouetteHeight);
+        drawReferenceSilhouetteMask(
+          targetCanvas,
+          editorReferenceImage,
+          silhouetteRect.x,
+          silhouetteRect.y,
+          silhouetteRect.w,
+          silhouetteRect.h
+        );
       }
     }
     if (editorPlacement.flipped) {

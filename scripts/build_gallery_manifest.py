@@ -25,6 +25,7 @@ REFERENCE = ROOT / "old.png"
 OUTPUT = ROOT / "js" / "gallery-data.js"
 PREVIEW_DIR = ROOT / "assets" / "gallery" / "previews"
 SUPPORTED = {".png", ".jpg", ".jpeg", ".webp"}
+REFERENCE_MASK_HEIGHT_RATIO = 1.2
 
 
 @dataclass
@@ -160,8 +161,6 @@ def analyse(path: Path, reference: Component) -> dict[str, object]:
         source_x = width * 0.38
         source_y = height * 0.28
         source_size = min(width, height) * 0.32
-        source_width = source_size
-        source_height = source_size
         confidence = 0.0
     else:
         score, best = ranked[0]
@@ -173,9 +172,16 @@ def analyse(path: Path, reference: Component) -> dict[str, object]:
         source_size = 400 * scale
         source_x = best.x0 - reference.x0 * scale
         source_y = best.y0 - reference.y0 * scale
-        source_width = box_width * scale
-        source_height = box_height * scale
         confidence = max(0.0, min(1.0, 1 - score / 9))
+
+    # `source_x` / `source_y` are the reconstructed top-left of the 400px-wide
+    # reference. old.png itself is cropped at its lower edge, while the same
+    # character in the thumbnails continues into two feet. The browser rebuilds
+    # those feet in a 400x480 binary mask, so retain that complete mask height.
+    # The previous implementation also scaled the already-scaled orange
+    # component a second time, producing a tiny mask.
+    source_width = source_size
+    source_height = source_size * REFERENCE_MASK_HEIGHT_RATIO
 
     # The replacement has a wider silhouette than old.png. A little extra
     # height ensures the reference's crown and feet are hidden without adding
