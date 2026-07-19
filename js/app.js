@@ -36,6 +36,8 @@
   const OLD_REFERENCE_SRC = 'old.png';
   const BLACKOUT_BLEED_PIXELS = 6;
   const OLD_COMPLETE_MASK_HEIGHT = 480;
+  const ROTATION_HANDLE_DISTANCE = 36;
+  const ROTATION_HANDLE_HIT_RADIUS = 16;
 
   const levelThresholds = [0, 10, 30, 60, 120, 240, 420, 660, 960, 1440].map(minutes => minutes * 60);
   const levelTitles = [
@@ -693,8 +695,14 @@
     const item = galleryItems[index];
     const saved = galleryEdits[item.src];
     return saved && Number.isFinite(saved.x) && Number.isFinite(saved.y) && Number.isFinite(saved.w)
-      ? { x: saved.x, y: saved.y, w: saved.w, flipped: Boolean(saved.flipped) }
-      : { ...item.placement, flipped: false };
+      ? {
+          x: saved.x,
+          y: saved.y,
+          w: saved.w,
+          flipped: Boolean(saved.flipped),
+          rotation: normalizeRotation(saved.rotation)
+        }
+      : { ...item.placement, flipped: false, rotation: 0 };
   }
 
   function updatePreviewOverlay(index) {
@@ -704,7 +712,7 @@
     overlay.style.left = `${placement.x * 100}%`;
     overlay.style.top = `${placement.y * 100}%`;
     overlay.style.width = `${placement.w * 100}%`;
-    overlay.style.transform = placement.flipped ? 'scaleX(-1)' : 'none';
+    overlay.style.transform = `rotate(${placement.rotation}deg) scaleX(${placement.flipped ? -1 : 1})`;
   }
 
   function openGallery() {
@@ -733,7 +741,7 @@
 
   function renderLightbox() {
     const item = galleryItems[activeGalleryIndex];
-    el.lightboxMeta.textContent = `${String(activeGalleryIndex + 1).padStart(2, '0')} / ${String(galleryItems.length).padStart(2, '0')} · POSITION & SIZE EDITOR`;
+    el.lightboxMeta.textContent = `${String(activeGalleryIndex + 1).padStart(2, '0')} / ${String(galleryItems.length).padStart(2, '0')} · POSITION · SIZE · ROTATION`;
     el.lightboxTitle.textContent = item.title;
   }
 
@@ -874,6 +882,17 @@
     return placement.w * editorBaseImage.naturalWidth / KOFU_OVERLAY_ASPECT / editorBaseImage.naturalHeight;
   }
 
+  function normalizeRotation(value) {
+    const angle = Number(value);
+    if (!Number.isFinite(angle)) return 0;
+    const normalized = ((angle + 180) % 360 + 360) % 360 - 180;
+    return normalized === -180 && angle > 0 ? 180 : normalized;
+  }
+
+  function editorRotationRadians(placement = editorPlacement) {
+    return normalizeRotation(placement?.rotation) * Math.PI / 180;
+  }
+
   function drawReferenceSilhouetteMask(targetCanvas, referenceImage, drawX, drawY, drawWidth, drawHeight) {
     if (!referenceImage || drawWidth <= 0 || drawHeight <= 0) return;
     const context = targetCanvas.getContext('2d');
@@ -935,6 +954,9 @@
     const overlayHeight = overlayWidth / KOFU_OVERLAY_ASPECT;
     const x = editorPlacement.x * width;
     const y = editorPlacement.y * height;
+    const centerX = x + overlayWidth / 2;
+    const centerY = y + overlayHeight / 2;
+    const rotation = editorRotationRadians();
     const item = galleryItems[activeGalleryIndex];
     const shouldBlackoutOldImage = typeof item?.confidence === 'number' && item.confidence > 0;
     context.clearRect(0, 0, width, height);
@@ -952,31 +974,54 @@
         );
       }
     }
-    if (editorPlacement.flipped) {
-      context.save();
-      context.translate(x + overlayWidth, y);
-      context.scale(-1, 1);
-      context.drawImage(editorOverlayImage, 0, 0, overlayWidth, overlayHeight);
-      context.restore();
-    } else {
-      context.drawImage(editorOverlayImage, x, y, overlayWidth, overlayHeight);
-    }
+    context.save();
+    context.translate(centerX, centerY);
+    context.rotate(rotation);
+    context.scale(editorPlacement.flipped ? -1 : 1, 1);
+    context.drawImage(editorOverlayImage, -overlayWidth / 2, -overlayHeight / 2, overlayWidth, overlayHeight);
+    context.restore();
 
     if (!showGuides) return;
     const line = Math.max(2, width / 500);
     context.save();
+    context.translate(centerX, centerY);
+    context.rotate(rotation);
     context.strokeStyle = 'rgba(255, 199, 145, .95)';
     context.lineWidth = line;
     context.setLineDash([line * 4, line * 3]);
-    context.strokeRect(x, y, overlayWidth, overlayHeight);
+    context.strokeRect(-overlayWidth / 2, -overlayHeight / 2, overlayWidth, overlayHeight);
     context.setLineDash([]);
     context.fillStyle = '#ffd0a5';
     const handle = line * 3;
-    [[x, y], [x + overlayWidth, y], [x, y + overlayHeight], [x + overlayWidth, y + overlayHeight]].forEach(([handleX, handleY]) => {
+    [
+      [-overlayWidth / 2, -overlayHeight / 2],
+      [overlayWidth / 2, -overlayHeight / 2],
+      [-overlayWidth / 2, overlayHeight / 2],
+      [overlayWidth / 2, overlayHeight / 2]
+    ].forEach(([handleX, handleY]) => {
       context.beginPath();
       context.arc(handleX, handleY, handle, 0, Math.PI * 2);
       context.fill();
     });
+
+    const displayWidth = targetCanvas.getBoundingClientRect().width || width;
+    const displayScale = displayWidth / width;
+    const rotationStem = ROTATION_HANDLE_DISTANCE / displayScale;
+    const rotationHandle = Math.max(handle * 1.15, 7 / displayScale);
+    const rotationY = -overlayHeight / 2 - rotationStem;
+    context.strokeStyle = '#76c98a';
+    context.lineWidth = Math.max(line, 2 / displayScale);
+    context.beginPath();
+    context.moveTo(0, -overlayHeight / 2);
+    context.lineTo(0, rotationY);
+    context.stroke();
+    context.fillStyle = '#76c98a';
+    context.strokeStyle = '#e9fff0';
+    context.lineWidth = Math.max(line * .75, 1.5 / displayScale);
+    context.beginPath();
+    context.arc(0, rotationY, rotationHandle, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
     context.restore();
   }
 
@@ -985,48 +1030,106 @@
     return {
       x: (event.clientX - rect.left) / rect.width,
       y: (event.clientY - rect.top) / rect.height,
+      pixelX: event.clientX - rect.left,
+      pixelY: event.clientY - rect.top,
       rect
     };
   }
 
+  function editorOverlayGeometry(rect) {
+    if (!editorPlacement || !rect) return null;
+    const width = editorPlacement.w * rect.width;
+    const height = overlayHeightRatio() * rect.height;
+    const centerX = editorPlacement.x * rect.width + width / 2;
+    const centerY = editorPlacement.y * rect.height + height / 2;
+    const angle = editorRotationRadians();
+    const cosine = Math.cos(angle);
+    const sine = Math.sin(angle);
+    const corners = [
+      { name: 'nw', signX: -1, signY: -1 },
+      { name: 'ne', signX: 1, signY: -1 },
+      { name: 'sw', signX: -1, signY: 1 },
+      { name: 'se', signX: 1, signY: 1 }
+    ].map(corner => {
+      const localX = corner.signX * width / 2;
+      const localY = corner.signY * height / 2;
+      const rotatedX = localX * cosine - localY * sine;
+      const rotatedY = localX * sine + localY * cosine;
+      return {
+        ...corner,
+        x: centerX + rotatedX,
+        y: centerY + rotatedY,
+        anchorX: centerX - rotatedX,
+        anchorY: centerY - rotatedY
+      };
+    });
+    const rotationLocalY = -height / 2 - ROTATION_HANDLE_DISTANCE;
+    const rotationHandle = {
+      x: centerX - rotationLocalY * sine,
+      y: centerY + rotationLocalY * cosine
+    };
+    return { width, height, centerX, centerY, angle, cosine, sine, corners, rotationHandle };
+  }
+
+  function editorRotationHandleAt(point) {
+    const geometry = editorOverlayGeometry(point.rect);
+    if (!geometry) return null;
+    const distance = Math.hypot(
+      point.pixelX - geometry.rotationHandle.x,
+      point.pixelY - geometry.rotationHandle.y
+    );
+    return distance <= ROTATION_HANDLE_HIT_RADIUS ? geometry : null;
+  }
+
   function editorHandleAt(point) {
-    if (!editorPlacement) return null;
-    const height = overlayHeightRatio();
-    const left = editorPlacement.x;
-    const top = editorPlacement.y;
-    const right = left + editorPlacement.w;
-    const bottom = top + height;
-    const handles = [
-      { name: 'nw', x: left, y: top, anchorX: right, anchorY: bottom, signX: -1, signY: -1 },
-      { name: 'ne', x: right, y: top, anchorX: left, anchorY: bottom, signX: 1, signY: -1 },
-      { name: 'sw', x: left, y: bottom, anchorX: right, anchorY: top, signX: -1, signY: 1 },
-      { name: 'se', x: right, y: bottom, anchorX: left, anchorY: top, signX: 1, signY: 1 }
-    ];
-    return handles.find(handle => {
-      const deltaX = (point.x - handle.x) * point.rect.width;
-      const deltaY = (point.y - handle.y) * point.rect.height;
+    const geometry = editorOverlayGeometry(point.rect);
+    if (!geometry) return null;
+    return geometry.corners.find(handle => {
+      const deltaX = point.pixelX - handle.x;
+      const deltaY = point.pixelY - handle.y;
       return Math.hypot(deltaX, deltaY) <= 20;
     }) || null;
   }
 
   function pointInsideOverlay(point) {
-    const height = overlayHeightRatio();
-    return point.x >= editorPlacement.x && point.x <= editorPlacement.x + editorPlacement.w
-      && point.y >= editorPlacement.y && point.y <= editorPlacement.y + height;
+    const geometry = editorOverlayGeometry(point.rect);
+    if (!geometry) return false;
+    const deltaX = point.pixelX - geometry.centerX;
+    const deltaY = point.pixelY - geometry.centerY;
+    const localX = deltaX * geometry.cosine + deltaY * geometry.sine;
+    const localY = -deltaX * geometry.sine + deltaY * geometry.cosine;
+    return Math.abs(localX) <= geometry.width / 2
+      && Math.abs(localY) <= geometry.height / 2;
   }
 
   function startEditorDrag(event) {
     if (!editorPlacement || !editorBaseImage) return;
     const point = editorPointerPosition(event);
+    const rotationGeometry = editorRotationHandleAt(point);
     const handle = editorHandleAt(point);
-    if (handle) {
+    if (rotationGeometry) {
+      const pointerAngle = Math.atan2(
+        point.pixelY - rotationGeometry.centerY,
+        point.pixelX - rotationGeometry.centerX
+      );
+      editorDrag = {
+        type: 'rotate',
+        centerX: rotationGeometry.centerX,
+        centerY: rotationGeometry.centerY,
+        offset: editorRotationRadians() - pointerAngle
+      };
+    } else if (handle) {
+      const geometry = editorOverlayGeometry(point.rect);
       editorDrag = {
         type: 'resize',
         anchorX: handle.anchorX,
         anchorY: handle.anchorY,
         signX: handle.signX,
         signY: handle.signY,
-        ratio: editorBaseImage.naturalWidth / KOFU_OVERLAY_ASPECT / editorBaseImage.naturalHeight
+        ratio: geometry.height / geometry.width,
+        angle: editorRotationRadians(),
+        rectWidth: point.rect.width,
+        rectHeight: point.rect.height
       };
     } else if (pointInsideOverlay(point)) {
       editorDrag = {
@@ -1046,8 +1149,11 @@
   function moveEditorDrag(event) {
     const point = editorPointerPosition(event);
     if (!editorDrag || !editorPlacement) {
+      const rotationGeometry = editorRotationHandleAt(point);
       const handle = editorHandleAt(point);
-      if (handle) {
+      if (rotationGeometry) {
+        el.editorCanvas.style.cursor = 'crosshair';
+      } else if (handle) {
         el.editorCanvas.style.cursor = handle.name === 'nw' || handle.name === 'se' ? 'nwse-resize' : 'nesw-resize';
       } else {
         el.editorCanvas.style.cursor = pointInsideOverlay(point) ? 'grab' : 'default';
@@ -1055,22 +1161,40 @@
       return;
     }
 
-    if (editorDrag.type === 'move') {
+    if (editorDrag.type === 'rotate') {
+      const pointerAngle = Math.atan2(
+        point.pixelY - editorDrag.centerY,
+        point.pixelX - editorDrag.centerX
+      );
+      editorPlacement.rotation = normalizeRotation(
+        (pointerAngle + editorDrag.offset) * 180 / Math.PI
+      );
+    } else if (editorDrag.type === 'move') {
       editorPlacement.x = point.x - editorDrag.offsetX;
       editorPlacement.y = point.y - editorDrag.offsetY;
     } else {
-      const deltaX = point.x - editorDrag.anchorX;
-      const deltaY = point.y - editorDrag.anchorY;
+      const deltaY = point.pixelY - editorDrag.anchorY;
       const ratio = editorDrag.ratio;
-      const projectedWidth = (
-        deltaX * editorDrag.signX
-        + deltaY * editorDrag.signY * ratio
-      ) / (1 + ratio * ratio);
-      const width = Math.min(1.25, Math.max(.03, projectedWidth));
-      const height = width * ratio;
+      const deltaPixelX = point.pixelX - editorDrag.anchorX;
+      const cosine = Math.cos(editorDrag.angle);
+      const sine = Math.sin(editorDrag.angle);
+      const basisX = editorDrag.signX * cosine - editorDrag.signY * ratio * sine;
+      const basisY = editorDrag.signX * sine + editorDrag.signY * ratio * cosine;
+      const projectedPixelWidth = (
+        deltaPixelX * basisX + deltaY * basisY
+      ) / (basisX * basisX + basisY * basisY);
+      const width = Math.min(1.25, Math.max(.03, projectedPixelWidth / editorDrag.rectWidth));
+      const pixelWidth = width * editorDrag.rectWidth;
+      const pixelHeight = pixelWidth * ratio;
+      const vectorX = (editorDrag.signX * pixelWidth) * cosine
+        - (editorDrag.signY * pixelHeight) * sine;
+      const vectorY = (editorDrag.signX * pixelWidth) * sine
+        + (editorDrag.signY * pixelHeight) * cosine;
+      const centerX = editorDrag.anchorX + vectorX / 2;
+      const centerY = editorDrag.anchorY + vectorY / 2;
       editorPlacement.w = width;
-      editorPlacement.x = editorDrag.signX > 0 ? editorDrag.anchorX : editorDrag.anchorX - width;
-      editorPlacement.y = editorDrag.signY > 0 ? editorDrag.anchorY : editorDrag.anchorY - height;
+      editorPlacement.x = (centerX - pixelWidth / 2) / editorDrag.rectWidth;
+      editorPlacement.y = (centerY - pixelHeight / 2) / editorDrag.rectHeight;
     }
     drawEditor();
     event.preventDefault();
