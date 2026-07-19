@@ -160,6 +160,8 @@ def analyse(path: Path, reference: Component) -> dict[str, object]:
         source_x = width * 0.38
         source_y = height * 0.28
         source_size = min(width, height) * 0.32
+        source_width = source_size
+        source_height = source_size
         confidence = 0.0
     else:
         score, best = ranked[0]
@@ -171,6 +173,8 @@ def analyse(path: Path, reference: Component) -> dict[str, object]:
         source_size = 400 * scale
         source_x = best.x0 - reference.x0 * scale
         source_y = best.y0 - reference.y0 * scale
+        source_width = box_width * scale
+        source_height = box_height * scale
         confidence = max(0.0, min(1.0, 1 - score / 9))
 
     # The replacement has a wider silhouette than old.png. A little extra
@@ -191,6 +195,12 @@ def analyse(path: Path, reference: Component) -> dict[str, object]:
             "x": round(overlay_x / width, 6),
             "y": round(overlay_y / height, 6),
             "w": round(overlay_width / width, 6),
+        },
+        "silhouette": {
+            "x": round(source_x / width, 6),
+            "y": round(source_y / height, 6),
+            "w": round(source_width / width, 6),
+            "h": round(source_height / height, 6),
         },
         "confidence": round(confidence, 3),
     }

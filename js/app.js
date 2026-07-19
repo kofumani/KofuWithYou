@@ -101,6 +101,7 @@
   let editorPlacement = null;
   let editorBaseImage = null;
   let editorOverlayImage = null;
+  let editorReferenceImage = null;
   let editorDrag = null;
   let editorLoadToken = 0;
 
@@ -730,10 +731,20 @@
     });
   }
 
+  async function loadReferenceImage() {
+    try {
+      return await loadImage('old.webp');
+    } catch {
+      return loadImage('old.png');
+    }
+  }
+
   async function loadEditorItem() {
     const token = ++editorLoadToken;
     const item = galleryItems[activeGalleryIndex];
     editorBaseImage = null;
+    editorOverlayImage = null;
+    editorReferenceImage = null;
     editorPlacement = getGalleryPlacement(activeGalleryIndex);
     $('#overlayFlip').classList.toggle('active', editorPlacement.flipped);
     $('#overlayFlip').setAttribute('aria-pressed', String(editorPlacement.flipped));
@@ -741,13 +752,15 @@
     el.editorHint.hidden = true;
     el.editorCanvas.hidden = true;
     try {
-      const [base, overlay] = await Promise.all([
+      const [base, overlay, reference] = await Promise.all([
         loadImage(item.src),
-        editorOverlayImage ? Promise.resolve(editorOverlayImage) : loadImage(KOFU_OVERLAY_SRC)
+        editorOverlayImage ? Promise.resolve(editorOverlayImage) : loadImage(KOFU_OVERLAY_SRC),
+        loadReferenceImage()
       ]);
       if (token !== editorLoadToken) return;
       editorBaseImage = base;
       editorOverlayImage = overlay;
+      editorReferenceImage = reference;
       el.editorCanvas.width = base.naturalWidth;
       el.editorCanvas.height = base.naturalHeight;
       el.editorCanvas.style.aspectRatio = `${base.naturalWidth} / ${base.naturalHeight}`;
@@ -766,6 +779,58 @@
     return placement.w * editorBaseImage.naturalWidth / KOFU_OVERLAY_ASPECT / editorBaseImage.naturalHeight;
   }
 
+  function drawReferenceSilhouetteMask(targetCanvas, referenceImage, drawX, drawY, drawWidth, drawHeight) {
+    if (!referenceImage || drawWidth <= 0 || drawHeight <= 0) return;
+    const context = targetCanvas.getContext('2d');
+    const maskCanvas = document.createElement('canvas');
+    maskCanvas.width = targetCanvas.width;
+    maskCanvas.height = targetCanvas.height;
+    const maskContext = maskCanvas.getContext('2d');
+    maskContext.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+    maskContext.drawImage(referenceImage, drawX, drawY, drawWidth, drawHeight);
+    const imageData = maskContext.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+    const data = imageData.data;
+    for (let index = 0; index < data.length; index += 4) {
+      if (data[index + 3] > 0) {
+        data[index] = 0;
+        data[index + 1] = 0;
+        data[index + 2] = 0;
+        data[index + 3] = 255;
+      }
+    }
+    maskContext.putImageData(imageData, 0, 0);
+    context.save();
+    context.globalCompositeOperation = 'source-over';
+    context.drawImage(maskCanvas, 0, 0);
+    context.restore();
+  }
+
+  function getEditorSilhouetteRect(item = galleryItems[activeGalleryIndex]) {
+    if (!editorBaseImage || !item) return null;
+    const width = editorBaseImage.naturalWidth;
+    const height = editorBaseImage.naturalHeight;
+    if (item.silhouette && typeof item.silhouette.x === 'number') {
+      return {
+        x: item.silhouette.x * width,
+        y: item.silhouette.y * height,
+        w: item.silhouette.w * width,
+        h: item.silhouette.h * height
+      };
+    }
+    const placement = item.placement || editorPlacement;
+    if (!placement) return null;
+    const overlayWidth = placement.w * width;
+    const overlayHeight = overlayWidth / KOFU_OVERLAY_ASPECT;
+    const x = placement.x * width;
+    const y = placement.y * height;
+    return {
+      x: x + overlayWidth * 0.16,
+      y: y + overlayHeight * 0.06,
+      w: overlayWidth * 0.72,
+      h: overlayHeight * 0.90
+    };
+  }
+
   function drawEditor(showGuides = true, targetCanvas = el.editorCanvas) {
     if (!editorBaseImage || !editorOverlayImage || !editorPlacement) return;
     const context = targetCanvas.getContext('2d');
@@ -775,8 +840,22 @@
     const overlayHeight = overlayWidth / KOFU_OVERLAY_ASPECT;
     const x = editorPlacement.x * width;
     const y = editorPlacement.y * height;
+    const item = galleryItems[activeGalleryIndex];
+    const shouldBlackoutOldImage = typeof item?.confidence === 'number' && item.confidence > 0;
     context.clearRect(0, 0, width, height);
     context.drawImage(editorBaseImage, 0, 0, width, height);
+    if (shouldBlackoutOldImage && editorReferenceImage) {
+      const silhouetteRect = getEditorSilhouetteRect(item);
+      if (silhouetteRect) {
+        const referenceAspect = editorReferenceImage.naturalWidth / editorReferenceImage.naturalHeight;
+        const maxHeight = Math.max(8, silhouetteRect.h);
+        const silhouetteHeight = Math.max(8, Math.min(maxHeight, silhouetteRect.w / referenceAspect));
+        const silhouetteWidth = silhouetteHeight * referenceAspect;
+        const silhouetteX = silhouetteRect.x + (silhouetteRect.w - silhouetteWidth) / 2;
+        const silhouetteY = silhouetteRect.y + (silhouetteRect.h - silhouetteHeight) / 2;
+        drawReferenceSilhouetteMask(targetCanvas, editorReferenceImage, silhouetteX, silhouetteY, silhouetteWidth, silhouetteHeight);
+      }
+    }
     if (editorPlacement.flipped) {
       context.save();
       context.translate(x + overlayWidth, y);
